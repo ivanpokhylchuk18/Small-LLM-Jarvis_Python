@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Audio
+*.wav
+*.mp3
+*.ogg
+*.flac
+recordings/
+
+# AI models
+*.onnx
+*.onnx.json
+models/
+voices/
+piper-voices/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+
+# Screenshots
+screenshots/
