@@ -8,6 +8,7 @@ venv/
 .env
 .env.*
 !.env.example
+memory.json
 
 # Audio
 *.wav
@@ -38,3 +39,6 @@ Thumbs.db
 
 # Screenshots
 screenshots/
+*.png
+screenshot.png
+last_screenshot.png

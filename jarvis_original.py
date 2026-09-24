@@ -20,25 +20,14 @@ Features:
 - Explicit language switching ("speak Ukrainian", "speak English")
 """
 
-import os
 import subprocess
-
-# Hide console windows for helper executables when IVATRON runs via pythonw.
-# Without this, console programs such as nvidia-smi can flash a CMD window.
-if os.name == "nt":
-    CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-else:
-    CREATE_NO_WINDOW = 0
-
-
-def _hidden_subprocess_kwargs():
-    return {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
 import http.server
 import socketserver
 import threading
 import requests
 import pychromecast
 import time
+import os
 import json
 import webbrowser
 import shutil
@@ -46,17 +35,6 @@ import logging
 import base64
 import re
 import traceback
-import asyncio
-import math
-import platform
-from zoneinfo import ZoneInfo
-
-try:
-    import flet as ft
-    HAS_FLET = True
-except ImportError:
-    HAS_FLET = False
-
 from datetime import datetime
 from urllib.parse import quote_plus, unquote
 from functools import partial
@@ -66,12 +44,6 @@ import pyautogui
 import wave
 import sounddevice as sd
 import numpy as np
-
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
 
 try:
     import pyperclip
@@ -107,19 +79,19 @@ except ImportError:
 # CONFIG
 # ============================================================
 
-# Keep machine-specific values in the local .env file only.
-# These defaults are intentionally generic so a public repo does not expose
-# your private LAN IPs, Chromecast UUID, or local filesystem paths.
-MY_IP = os.getenv("MY_IP", "127.0.0.1")
-CLOCK_IP = os.getenv("CLOCK_IP", "127.0.0.1")
-CLOCK_UUID = os.getenv("CLOCK_UUID", "")
+MY_IP = os.getenv("MY_IP", "192.168.1.71")
+CLOCK_IP = os.getenv("CLOCK_IP", "192.168.1.124")
+CLOCK_UUID = os.getenv(
+    "CLOCK_UUID",
+    "6417e6b7-60ba-df93-d9c4-7218458fb1b4"
+)
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:latest")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
-PIPER_EN_MODEL = os.getenv("PIPER_EN_MODEL", "")
-PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL", "")
+PIPER_EN_MODEL = os.getenv("PIPER_EN_MODEL")
+PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL")
 
 # Optional speaker index, only needed for multi-speaker Piper models
 # (e.g. some uk_UA voices ship several speakers in one .onnx file).
@@ -127,13 +99,11 @@ PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL", "")
 PIPER_EN_SPEAKER = os.getenv("PIPER_EN_SPEAKER")
 PIPER_UK_SPEAKER = os.getenv("PIPER_UK_SPEAKER")
 
-RECORDING_WAV = os.getenv("RECORDING_WAV", str(Path("./input.wav")))
-RESPONSE_WAV = os.getenv("RESPONSE_WAV", str(Path("./response.wav")))
-SCREENSHOT_PATH = os.getenv("SCREENSHOT_PATH", str(Path("./screenshot.png")))
+RECORDING_WAV = os.getenv("RECORDING_WAV", r"E:\jarvis\input.wav")
+RESPONSE_WAV = os.getenv("RESPONSE_WAV", r"E:\jarvis\response.wav")
+SCREENSHOT_PATH = os.getenv("SCREENSHOT_PATH", r"E:\jarvis\screenshot.png")
 
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
-TIMEZONE_NAME = os.getenv("TIMEZONE", "UTC")
-LOCATION_NAME = os.getenv("LOCATION_NAME", "Local")
 
 SAMPLE_RATE = 16000
 
@@ -149,12 +119,12 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
 SAVE_RECORDINGS = os.getenv("SAVE_RECORDINGS", "false").lower() == "true"
 
 WORKSPACE_ROOT = Path(
-    os.getenv("WORKSPACE_ROOT", "./workspace")
+    os.getenv("WORKSPACE_ROOT", r"E:\jarvis\workspace")
 )
 
-LOGS_DIR = Path(os.getenv("LOGS_DIR", "./logs"))
+LOGS_DIR = Path(os.getenv("LOGS_DIR", r"E:\jarvis\logs"))
 MEMORY_FILE = Path(
-    os.getenv("MEMORY_FILE", "./memory.json")
+    os.getenv("MEMORY_FILE", r"E:\jarvis\memory.json")
 )
 
 USE_WAKE_WORD = os.getenv("USE_WAKE_WORD", "false").lower() == "true"
@@ -211,19 +181,12 @@ if not logger.handlers:
 
 STATUS = {
     "state": "starting",
-    "assistant_state": "starting",
     "ollama": "unknown",
     "vision": "unknown",
     "whisper": "loading",
     "piper_en": "unknown",
     "piper_uk": "unknown",
     "lenovo": "disconnected",
-    "audio_output": "PC Speakers",
-    "audio_mode": "auto",
-    "cpu": "unknown",
-    "memory": "unknown",
-    "gpu": "unknown",
-    "time_local": "--:--",
     "microphone": "idle",
     "last_command": "",
     "last_response": "",
@@ -235,61 +198,6 @@ STATUS = {
 }
 
 STATUS_LOCK = threading.Lock()
-
-# UI-facing conversation history. The existing `conversation` object remains
-# the LLM context; this list is only for the visual Flet chat panel.
-CHAT_HISTORY = []
-CHAT_LOCK = threading.Lock()
-
-# Global runtime state shared by the assistant worker and Flet UI.
-CAST = None
-ASSISTANT_ENABLED = True
-AUDIO_MODE = "auto"  # auto | clock | pc
-AUDIO_MODE_LOCK = threading.Lock()
-ASSISTANT_LOCK = threading.Lock()
-SHUTDOWN_EVENT = threading.Event()
-
-
-def add_chat(role, text):
-    if not text:
-        return
-    with CHAT_LOCK:
-        CHAT_HISTORY.append({
-            "role": role,
-            "text": str(text),
-            "time": datetime.now().strftime("%H:%M"),
-        })
-        # Keep the UI lightweight even after a long session.
-        if len(CHAT_HISTORY) > 80:
-            del CHAT_HISTORY[:-80]
-
-
-def assistant_is_enabled():
-    with ASSISTANT_LOCK:
-        return ASSISTANT_ENABLED
-
-
-def set_assistant_enabled(enabled):
-    global ASSISTANT_ENABLED
-    with ASSISTANT_LOCK:
-        ASSISTANT_ENABLED = bool(enabled)
-
-
-def get_audio_mode():
-    with AUDIO_MODE_LOCK:
-        return AUDIO_MODE
-
-
-def set_audio_mode(mode):
-    global AUDIO_MODE
-    mode = str(mode).lower().strip()
-    if mode not in ("auto", "clock", "pc"):
-        mode = "auto"
-    with AUDIO_MODE_LOCK:
-        AUDIO_MODE = mode
-    set_status(audio_mode=mode)
-    logger.info(f"Audio mode changed to: {mode.upper()}")
-    return mode
 
 
 def set_status(**kwargs):
@@ -1932,8 +1840,7 @@ def speak_to_wav(text, out_path, language="en"):
     subprocess.run(
         command,
         input=text.encode("utf-8"),
-        check=True,
-        **_hidden_subprocess_kwargs(),
+        check=True
     )
 
 
@@ -1970,7 +1877,7 @@ def get_dashboard_html():
         "ollama": "Ollama",
         "actions": "Actions",
         "piper": "Piper",
-        "audio": "Audio",
+        "lenovo": "Lenovo",
     }
     timings_html = "".join(
         f"<li>{label}: {s['last_timings'].get(key, 0):.2f}s</li>"
@@ -2201,39 +2108,6 @@ def play_audio_locally(wav_path):
 
 
 # ============================================================
-# AUDIO OUTPUT ROUTER
-# ============================================================
-
-def play_response_audio(cast, wav_path):
-    """Route TTS using the user's manual/automatic output preference."""
-    mode = get_audio_mode()
-
-    if mode == "pc":
-        set_status(audio_output="PC Speakers", last_error="")
-        play_audio_locally(wav_path)
-        return cast
-
-    url = f"http://{MY_IP}:{HTTP_PORT}/response.wav"
-    try:
-        cast = safe_play_media(cast, url, "audio/wav")
-        set_status(
-            lenovo="connected",
-            audio_output="Lenovo Smart Clock",
-            last_error="",
-        )
-        return cast
-    except Exception as e:
-        logger.warning(f"Lenovo unavailable ({e}); falling back to PC speakers.")
-        set_status(
-            lenovo="unreachable",
-            audio_output="PC Speakers",
-            last_error=f"Clock unavailable: {e}",
-        )
-        play_audio_locally(wav_path)
-        return None
-
-
-# ============================================================
 # LANGUAGE HELPERS
 # ============================================================
 
@@ -2263,86 +2137,6 @@ def detect_language_command(text):
 
 
 # ============================================================
-# BACKGROUND DEVICE MONITOR
-# ============================================================
-
-def monitor_clock():
-    """Monitor the clock while respecting the manual audio selection."""
-    global CAST
-    while not SHUTDOWN_EVENT.is_set():
-        try:
-            mode = get_audio_mode()
-            set_status(audio_mode=mode)
-            if mode == "pc":
-                set_status(audio_output="PC Speakers")
-            elif is_cast_connected(CAST):
-                set_status(lenovo="connected", audio_output="Lenovo Smart Clock")
-            else:
-                CAST = connect_cast(attempts=1, timeout=2.5, retry_wait=0)
-                if CAST is not None:
-                    set_status(lenovo="connected", audio_output="Lenovo Smart Clock")
-                else:
-                    set_status(lenovo="disconnected", audio_output="PC Speakers")
-        except Exception as e:
-            logger.debug(f"Clock monitor probe failed: {e}")
-            CAST = None
-            set_status(lenovo="disconnected", audio_output="PC Speakers")
-        SHUTDOWN_EVENT.wait(5)
-
-
-# ============================================================
-# LOCAL SYSTEM INTENTS
-# ============================================================
-
-def local_time_response(text):
-    """Answer simple time/date questions locally without asking Ollama."""
-    t = text.lower().strip()
-    time_words = ("what time", "current time", "time is it", "tell me the time", "котра година", "яка година")
-    date_words = ("what date", "what day is it", "today's date", "current date", "який сьогодні день", "яка сьогодні дата")
-    if not any(x in t for x in time_words + date_words):
-        return None
-    try:
-        now = datetime.now(ZoneInfo(TIMEZONE_NAME))
-    except Exception:
-        now = datetime.now()
-    if any(x in t for x in date_words):
-        if any('укра' in x for x in t):
-            return f"Сьогодні {now.strftime('%A, %B %d, %Y')}."
-        return f"Today is {now.strftime('%A, %B %d, %Y')}."
-    return f"It's {now.strftime('%-I:%M %p')} in {LOCATION_NAME}." if os.name != "nt" else f"It's {now.strftime('%I:%M %p').lstrip('0')} in {LOCATION_NAME}."
-
-
-def monitor_system():
-    while not SHUTDOWN_EVENT.is_set():
-        try:
-            try:
-                now = datetime.now(ZoneInfo(TIMEZONE_NAME))
-            except Exception:
-                now = datetime.now()
-            time_text = now.strftime('%I:%M %p').lstrip('0')
-            if HAS_PSUTIL:
-                cpu = f"{psutil.cpu_percent(interval=None):.0f}%"
-                mem = f"{psutil.virtual_memory().percent:.0f}%"
-            else:
-                cpu = memory = "N/A"
-            gpu = "N/A"
-            try:
-                result = subprocess.run(
-                    ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=1.5,
-                    **_hidden_subprocess_kwargs(),
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    gpu = result.stdout.strip().splitlines()[0].strip() + "%"
-            except Exception:
-                pass
-            set_status(time_local=time_text, cpu=cpu, memory=mem, gpu=gpu)
-        except Exception:
-            pass
-        SHUTDOWN_EVENT.wait(2)
-
-
-# ============================================================
 # HANDLE TURN
 # ============================================================
 
@@ -2351,7 +2145,6 @@ def handle_turn(cast):
     logger.info("LISTENING")
     logger.info("=" * 50)
 
-    set_status(assistant_state="listening", state="online")
     timings = {}
     t_turn_start = time.perf_counter()
 
@@ -2365,24 +2158,10 @@ def handle_turn(cast):
 
     logger.info(f"You said: {question}")
     logger.info(f"Detected language: {detected_language}")
-    set_status(last_command=question, assistant_state="thinking")
-    add_chat("user", question)
+    set_status(last_command=question)
 
     if not question:
         logger.info("Didn't catch anything.")
-        return cast
-
-    local_reply = local_time_response(question)
-    if local_reply:
-        set_status(assistant_state="speaking", last_response=local_reply, last_action="local time/date")
-        add_chat("assistant", local_reply)
-        try:
-            tts_language = "uk" if any(c in question for c in "іїєґ") else "en"
-            speak_to_wav(local_reply, RESPONSE_WAV, language=tts_language)
-            cast = play_response_audio(cast, RESPONSE_WAV)
-        except Exception as e:
-            logger.error(f"Local response failed: {e}")
-        set_status(assistant_state="idle")
         return cast
 
     switch = detect_language_command(question)
@@ -2401,7 +2180,6 @@ def handle_turn(cast):
     )
 
     t0 = time.perf_counter()
-    set_status(assistant_state="thinking")
     plan = ask_llm(prompt)
     timings["ollama"] = time.perf_counter() - t0
 
@@ -2410,15 +2188,11 @@ def handle_turn(cast):
     set_status(last_response=speech)
 
     t0 = time.perf_counter()
-    set_status(assistant_state="executing" if plan.get("actions") else "speaking")
     speech = execute_action_plan(plan, verify=USE_VERIFICATION)
     timings["actions"] = time.perf_counter() - t0
 
     if not speech:
         speech = "Done."
-
-    set_status(last_response=speech, assistant_state="speaking")
-    add_chat("assistant", speech)
 
     tts_language = effective_language if effective_language in ("en", "uk") else "en"
 
@@ -2430,9 +2204,25 @@ def handle_turn(cast):
         return cast
     timings["piper"] = time.perf_counter() - t0
 
+    url = f"http://{MY_IP}:{HTTP_PORT}/response.wav"
+
     t0 = time.perf_counter()
-    cast = play_response_audio(cast, RESPONSE_WAV)
-    timings["audio"] = time.perf_counter() - t0
+    if cast is not None:
+        try:
+            cast = safe_play_media(cast, url, "audio/wav")
+        except Exception as e:
+            logger.error(f"Could not play response through Lenovo: {e}")
+            set_status(last_error=f"cast: {e}")
+            play_audio_locally(RESPONSE_WAV)
+    else:
+        try:
+            cast = safe_play_media(None, url, "audio/wav")
+        except Exception as e:
+            logger.warning(
+                f"Clock unavailable ({e}); playing on PC speakers."
+            )
+            play_audio_locally(RESPONSE_WAV)
+    timings["lenovo"] = time.perf_counter() - t0
 
     total = time.perf_counter() - t_turn_start
 
@@ -2443,7 +2233,7 @@ def handle_turn(cast):
         "ollama": "Ollama",
         "actions": "Actions",
         "piper": "Piper",
-        "audio": "Audio",
+        "lenovo": "Lenovo",
     }
     for key, label in labels.items():
         summary_lines.append(f"  {label:<18} {timings.get(key, 0):.2f}s")
@@ -2457,660 +2247,18 @@ def handle_turn(cast):
 
 
 # ============================================================
-# FLET DESKTOP UI
+# MAIN
 # ============================================================
 
-BG = "#070B12"
-SURFACE = "#0D1420"
-SURFACE_2 = "#111B2A"
-BORDER = "#1C2A3D"
-TEXT = "#E8F1FF"
-MUTED = "#8292A8"
-ACCENT = "#59C7FF"
-ACCENT_2 = "#8B7CFF"
-GREEN = "#4ADE80"
-YELLOW = "#FACC15"
-RED = "#F87171"
+def main():
+    httpd = None
 
-
-def _status_snapshot():
-    with STATUS_LOCK:
-        return dict(STATUS)
-
-
-def _chat_snapshot():
-    with CHAT_LOCK:
-        return list(CHAT_HISTORY)
-
-
-def _is_good(value):
-    value = str(value).lower()
-    return any(x in value for x in ("ready", "connected", "online", "cuda", "cpu"))
-
-
-def _status_color(value):
-    value = str(value).lower()
-    if _is_good(value):
-        return GREEN
-    if any(x in value for x in ("starting", "loading", "idle", "waiting", "thinking", "listening", "speaking", "executing", "disconnected", "reconnecting", "unknown")):
-        return YELLOW
-    return RED
-
-
-def _status_dot(value, size=9):
-    return ft.Container(
-        width=size,
-        height=size,
-        bgcolor=_status_color(value),
-        border_radius=size / 2,
-        shadow=ft.BoxShadow(
-            spread_radius=1,
-            blur_radius=10,
-            color=_status_color(value) + "66",
-        ),
-    )
-
-
-def _card(content, padding=16, expand=False):
-    return ft.Container(
-        content=content,
-        padding=padding,
-        bgcolor=SURFACE,
-        border=ft.Border.all(1, BORDER),
-        border_radius=18,
-        expand=expand,
-    )
-
-
-def _label(text, size=11):
-    return ft.Text(
-        text,
-        size=size,
-        color=MUTED,
-        weight=ft.FontWeight.W_600,
-    )
-
-
-def _value(text, size=14):
-    return ft.Text(
-        text,
-        size=size,
-        color=TEXT,
-        weight=ft.FontWeight.W_600,
-    )
-
-
-def _metric_card(title, icon, key, snapshot):
-    value = snapshot.get(key, "unknown")
-    return ft.Container(
-        content=ft.Row(
-            controls=[
-                ft.Container(
-                    content=ft.Text(icon, size=18),
-                    width=38,
-                    height=38,
-                    alignment=ft.Alignment.CENTER,
-                    bgcolor="#162235",
-                    border_radius=12,
-                ),
-                ft.Column(
-                    controls=[
-                        _label(title),
-                        ft.Row(
-                            controls=[
-                                _status_dot(value, 7),
-                                ft.Text(str(value).upper(), size=12, color=TEXT, weight=ft.FontWeight.W_600),
-                            ],
-                            spacing=7,
-                        ),
-                    ],
-                    spacing=3,
-                    tight=True,
-                ),
-            ],
-            spacing=11,
-        ),
-        padding=11,
-        bgcolor=SURFACE_2,
-        border=ft.Border.all(1, BORDER),
-        border_radius=15,
-    )
-
-
-def build_ui(page: "ft.Page"):
-    page.title = "IVATRON"
-    page.theme_mode = ft.ThemeMode.DARK
-    page.bgcolor = BG
-    page.padding = 0
-    page.spacing = 0
-
-    page.window.width = 1180
-    page.window.height = 760
-    page.window.min_width = 900
-    page.window.min_height = 620
-    page.window.center()
-
-    # -----------------------------
-    # Header
-    # -----------------------------
-    logo = ft.Container(
-        content=ft.Row(
-            controls=[
-                ft.Container(
-                    content=ft.Text("I", size=20, weight=ft.FontWeight.BOLD, color=BG),
-                    width=38,
-                    height=38,
-                    alignment=ft.Alignment.CENTER,
-                    bgcolor=ACCENT,
-                    border_radius=12,
-                    shadow=ft.BoxShadow(blur_radius=18, color=ACCENT + "55"),
-                ),
-                ft.Column(
-                    controls=[
-                        ft.Text("IVATRON", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
-                        ft.Text("AI COMPUTER ASSISTANT", size=9, color=MUTED, weight=ft.FontWeight.W_600),
-                    ],
-                    spacing=0,
-                    tight=True,
-                ),
-            ],
-            spacing=10,
-        )
-    )
-
-    state_text = ft.Text("STARTING", size=12, color=MUTED, weight=ft.FontWeight.W_700)
-    state_dot = _status_dot("starting", 8)
-    clock_header_text = ft.Text("--:--", size=11, color=TEXT, weight=ft.FontWeight.W_700)
-
-    header = ft.Container(
-        content=ft.Row(
-            controls=[
-                logo,
-                ft.Column(
-                    controls=[
-                        ft.Text("LOCAL TIME", size=8, color=MUTED),
-                        clock_header_text,
-                    ],
-                    spacing=0,
-                    tight=True,
-                ),
-                ft.Container(expand=True),
-                ft.Row(
-                    controls=[
-                        state_dot,
-                        state_text,
-                    ],
-                    spacing=8,
-                ),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
-        padding=ft.Padding.symmetric(horizontal=26, vertical=18),
-        border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
-    )
-
-    # -----------------------------
-    # Core / animated orb
-    # -----------------------------
-    orb_core = ft.Container(
-        content=ft.Text("◉", size=44, color=TEXT, weight=ft.FontWeight.BOLD),
-        width=118,
-        height=118,
-        alignment=ft.Alignment.CENTER,
-        bgcolor="#101D30",
-        border=ft.Border.all(1, ACCENT + "99"),
-        border_radius=59,
-        shadow=ft.BoxShadow(blur_radius=35, spread_radius=4, color=ACCENT + "44"),
-        animate=ft.Animation(420, ft.AnimationCurve.EASE_IN_OUT),
-    )
-    orb_mid = ft.Container(
-        content=orb_core,
-        width=148,
-        height=148,
-        alignment=ft.Alignment.CENTER,
-        border=ft.Border.all(1, ACCENT + "44"),
-        border_radius=74,
-        animate=ft.Animation(420, ft.AnimationCurve.EASE_IN_OUT),
-    )
-    orb_ring = ft.Container(
-        content=orb_mid,
-        width=178,
-        height=178,
-        alignment=ft.Alignment.CENTER,
-        border=ft.Border.all(1, ACCENT + "22"),
-        border_radius=89,
-        shadow=ft.BoxShadow(blur_radius=28, spread_radius=2, color=ACCENT + "18"),
-        animate=ft.Animation(420, ft.AnimationCurve.EASE_IN_OUT),
-    )
-
-    assistant_state_text = ft.Text(
-        "STARTING",
-        size=14,
-        color=ACCENT,
-        weight=ft.FontWeight.BOLD,
-    )
-    command_preview = ft.Text(
-        "Initializing IVATRON...",
-        size=12,
-        color=MUTED,
-        text_align=ft.TextAlign.CENTER,
-        max_lines=2,
-        overflow=ft.TextOverflow.ELLIPSIS,
-    )
-
-    core = _card(
-        ft.Column(
-            controls=[
-                ft.Container(height=8),
-                orb_ring,
-                assistant_state_text,
-                command_preview,
-                ft.Container(height=4),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=10,
-        ),
-        padding=20,
-    )
-
-    # -----------------------------
-    # Chat
-    # -----------------------------
-    chat_list = ft.ListView(
-        expand=True,
-        spacing=12,
-        auto_scroll=True,
-        padding=4,
-    )
-    if not _chat_snapshot():
-        add_chat("assistant", "IVATRON online. All systems are standing by.")
-
-    chat_header = ft.Row(
-        controls=[
-            ft.Column(
-                controls=[
-                    ft.Text("Conversation", size=17, color=TEXT, weight=ft.FontWeight.BOLD),
-                    ft.Text("Live assistant activity", size=10, color=MUTED),
-                ],
-                spacing=1,
-            ),
-            ft.Container(expand=True),
-            ft.Container(
-                content=ft.Text("LIVE", size=9, color=BG, weight=ft.FontWeight.BOLD),
-                bgcolor=GREEN,
-                padding=ft.Padding.symmetric(horizontal=9, vertical=5),
-                border_radius=8,
-            ),
-        ]
-    )
-
-    chat_panel = _card(
-        ft.Column(
-            controls=[
-                chat_header,
-                ft.Divider(height=1, color=BORDER),
-                chat_list,
-            ],
-            expand=True,
-            spacing=12,
-        ),
-        padding=18,
-        expand=True,
-    )
-
-    # -----------------------------
-    # System cards
-    # -----------------------------
-    metrics = ft.Column(spacing=9)
-
-    # -----------------------------
-    # Footer controls
-    # -----------------------------
-    pause_button = ft.Button(
-        content="PAUSE LISTENING",
-        icon=ft.Icons.PAUSE_ROUNDED,
-        style=ft.ButtonStyle(
-            bgcolor="#152238",
-            color=TEXT,
-            shape=ft.RoundedRectangleBorder(radius=12),
-        ),
-    )
-
-    def toggle_assistant(_=None):
-        enabled = not assistant_is_enabled()
-        set_assistant_enabled(enabled)
-        if enabled:
-            pause_button.content = "PAUSE LISTENING"
-            pause_button.icon = ft.Icons.PAUSE_ROUNDED
-            set_status(assistant_state="starting")
-        else:
-            pause_button.content = "RESUME LISTENING"
-            pause_button.icon = ft.Icons.PLAY_ARROW_ROUNDED
-            set_status(assistant_state="paused")
-        page.update()
-
-    pause_button.on_click = toggle_assistant
-
-    output_text = ft.Text("PC SPEAKERS", size=11, color=TEXT, weight=ft.FontWeight.W_700)
-    clock_text = ft.Text("CLOCK OFFLINE", size=10, color=MUTED)
-
-    mode_label = ft.Text("AUTO", size=9, color=ACCENT, weight=ft.FontWeight.BOLD)
-
-    mode_buttons = {}
-
-    def refresh_audio_buttons(selected):
-        mode_label.value = selected.upper()
-        for key, btn in mode_buttons.items():
-            btn.style = ft.ButtonStyle(
-                bgcolor=ACCENT if key == selected else "#132238",
-                color=BG if key == selected else TEXT,
-                shape=ft.RoundedRectangleBorder(radius=9),
-            )
-
-    def make_mode_button(label, mode):
-        btn = ft.Button(
-            content=label,
-            style=ft.ButtonStyle(
-                bgcolor=ACCENT if mode == get_audio_mode() else "#132238",
-                color=BG if mode == get_audio_mode() else TEXT,
-                shape=ft.RoundedRectangleBorder(radius=9),
-            ),
-        )
-        mode_buttons[mode] = btn
-        def choose(_=None):
-            selected = set_audio_mode(mode)
-            refresh_audio_buttons(selected)
-            page.update()
-        btn.on_click = choose
-        return btn
-
-    auto_btn = make_mode_button("AUTO", "auto")
-    clock_btn = make_mode_button("CLOCK", "clock")
-    pc_btn = make_mode_button("PC", "pc")
-
-    audio_modes = ft.Row(
-        controls=[auto_btn, clock_btn, pc_btn],
-        spacing=5,
-    )
-
-    footer = ft.Container(
-        content=ft.Row(
-            controls=[
-                ft.Row(
-                    controls=[
-                        ft.Container(
-                            content=ft.Text("🎙", size=15),
-                            width=32,
-                            height=32,
-                            alignment=ft.Alignment.CENTER,
-                            bgcolor="#162235",
-                            border_radius=10,
-                        ),
-                        ft.Column(
-                            controls=[
-                                _label("MICROPHONE", 9),
-                                ft.Text("READY", size=11, color=TEXT, weight=ft.FontWeight.W_700),
-                            ],
-                            spacing=0,
-                            tight=True,
-                        ),
-                    ],
-                    spacing=9,
-                ),
-                ft.Container(width=1, height=30, bgcolor=BORDER),
-                ft.Row(
-                    controls=[
-                        ft.Container(
-                            content=ft.Text("🔊", size=15),
-                            width=32,
-                            height=32,
-                            alignment=ft.Alignment.CENTER,
-                            bgcolor="#162235",
-                            border_radius=10,
-                        ),
-                        ft.Column(
-                            controls=[
-                                _label("AUDIO OUTPUT", 9),
-                                output_text,
-                                clock_text,
-                            ],
-                            spacing=0,
-                            tight=True,
-                        ),
-                    ],
-                    spacing=9,
-                ),
-                ft.Container(expand=True),
-                ft.Column(
-                    controls=[
-                        ft.Row(controls=[ft.Text("OUTPUT", size=8, color=MUTED), mode_label], spacing=6),
-                        audio_modes,
-                    ],
-                    spacing=3,
-                    horizontal_alignment=ft.CrossAxisAlignment.END,
-                ),
-                pause_button,
-            ],
-        ),
-        padding=ft.Padding.symmetric(horizontal=18, vertical=12),
-        border=ft.Border(top=ft.BorderSide(1, BORDER)),
-    )
-
-    body = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Container(
-                    content=ft.Row(
-                        controls=[
-                            ft.Container(
-                                content=ft.Column(
-                                    controls=[
-                                        ft.Text("SYSTEM CORE", size=9, color=MUTED, weight=ft.FontWeight.W_700),
-                                        core,
-                                    ],
-                                    spacing=8,
-                                ),
-                                width=270,
-                            ),
-                            chat_panel,
-                            ft.Container(
-                                content=ft.Column(
-                                    controls=[
-                                        ft.Text("SYSTEM", size=9, color=MUTED, weight=ft.FontWeight.W_700),
-                                        metrics,
-                                    ],
-                                    spacing=8,
-                                ),
-                                width=245,
-                            ),
-                        ],
-                        spacing=14,
-                        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                    ),
-                    padding=ft.Padding.all(18),
-                    expand=True,
-                ),
-                footer,
-            ],
-            spacing=0,
-            expand=True,
-        ),
-        expand=True,
-    )
-
-    page.add(
-        ft.Column(
-            controls=[header, body],
-            expand=True,
-            spacing=0,
-        )
-    )
-
-    async def refresh_ui():
-        last_chat_len = -1
-        animation_phase = 0.0
-        animation_tick = 0
-        while not SHUTDOWN_EVENT.is_set():
-            try:
-                s = _status_snapshot()
-
-                state = s.get("state", "unknown")
-                assistant_state = s.get("assistant_state", "idle")
-                state_text.value = str(state).upper()
-                clock_header_text.value = s.get("time_local", "--:--")
-                state_text.color = _status_color(state)
-                state_dot.bgcolor = _status_color(state)
-
-                assistant_state_text.value = str(assistant_state).upper()
-                assistant_state_text.color = (
-                    ACCENT_2 if assistant_state in ("thinking", "executing")
-                    else ACCENT if assistant_state in ("listening", "speaking")
-                    else MUTED
-                )
-
-                # Real animated core: the scale/shadow changes continuously instead of
-                # merely declaring an animation property. The animation speed and
-                # amplitude depend on what IVATRON is doing.
-                animation_tick += 1
-                animation_phase += 0.32
-                active = assistant_state in ("listening", "speaking", "thinking", "executing")
-                pulse = (1.0 + 0.045 * (0.5 + 0.5 * math.sin(animation_phase))) if active else (1.0 + 0.018 * math.sin(animation_phase * 0.55))
-                fast_pulse = (1.0 + 0.075 * (0.5 + 0.5 * math.sin(animation_phase * 1.35))) if assistant_state in ("listening", "speaking") else pulse
-                orb_ring.scale = fast_pulse
-                orb_mid.scale = pulse
-                orb_core.scale = 1.0 + (0.025 * math.sin(animation_phase * 1.7) if active else 0.0)
-                glow_color = ACCENT_2 if assistant_state in ("thinking", "executing") else ACCENT
-                orb_ring.border = ft.Border.all(
-                    1, glow_color + ("88" if active else "44"),
-                )
-                orb_mid.border = ft.Border.all(
-                    1, glow_color + ("AA" if active else "66"),
-                )
-                orb_core.shadow = ft.BoxShadow(
-                    blur_radius=(42 if active else 30) + int(8 * (0.5 + 0.5 * math.sin(animation_phase))),
-                    spread_radius=5 if active else 3,
-                    color=glow_color + ("55" if active else "30"),
-                )
-
-                if assistant_state == "listening":
-                    command_preview.value = s.get("last_command") or "Listening for your voice..."
-                elif assistant_state == "thinking":
-                    command_preview.value = "Thinking..."
-                elif assistant_state == "executing":
-                    command_preview.value = s.get("last_action") or "Executing actions..."
-                elif assistant_state == "speaking":
-                    command_preview.value = s.get("last_response") or "Speaking..."
-                elif assistant_state == "paused":
-                    command_preview.value = "Assistant paused"
-                else:
-                    command_preview.value = s.get("last_command") or "Ready when you are."
-
-                refresh_audio_buttons(s.get("audio_mode", "auto"))
-                output = s.get("audio_output", "PC Speakers")
-                output_text.value = str(output).upper()
-                output_text.color = GREEN if "Lenovo" in str(output) else TEXT
-                clock_text.value = (
-                    "CLOCK CONNECTED"
-                    if s.get("lenovo") == "connected"
-                    else "CLOCK OFFLINE • PC FALLBACK"
-                )
-                clock_text.color = (
-                    GREEN if s.get("lenovo") == "connected" else MUTED
-                )
-
-                # Refresh system cards.
-                metrics.controls = [
-                    _metric_card("AI ENGINE", "🧠", "ollama", s),
-                    _metric_card("SPEECH", "🎙", "whisper", s),
-                    _metric_card("VOICE", "🔊", "piper_en", s),
-                    _metric_card("VISION", "◉", "vision", s),
-                    _metric_card("SMART CLOCK", "▣", "lenovo", s),
-                    _metric_card("CPU", "◫", "cpu", s),
-                    _metric_card("MEMORY", "▤", "memory", s),
-                    _metric_card("GPU", "◆", "gpu", s),
-                ]
-
-                chats = _chat_snapshot()
-                if len(chats) != last_chat_len:
-                    chat_list.controls.clear()
-                    for item in chats:
-                        is_user = item["role"] == "user"
-                        bubble = ft.Container(
-                            content=ft.Column(
-                                controls=[
-                                    ft.Row(
-                                        controls=[
-                                            ft.Text(
-                                                "YOU" if is_user else "IVATRON",
-                                                size=9,
-                                                color=ACCENT if is_user else ACCENT_2,
-                                                weight=ft.FontWeight.BOLD,
-                                            ),
-                                            ft.Container(expand=True),
-                                            ft.Text(item["time"], size=8, color=MUTED),
-                                        ]
-                                    ),
-                                    ft.Text(
-                                        item["text"],
-                                        size=12,
-                                        color=TEXT,
-                                        selectable=True,
-                                    ),
-                                ],
-                                spacing=5,
-                            ),
-                            padding=ft.Padding.all(12),
-                            bgcolor="#101A28" if is_user else "#121A2D",
-                            border=ft.Border.all(
-                                1,
-                                (ACCENT if is_user else ACCENT_2) + "24",
-                            ),
-                            border_radius=14,
-                        )
-                        chat_list.controls.append(bubble)
-                    last_chat_len = len(chats)
-
-                page.update()
-            except Exception as e:
-                logger.debug(f"Flet refresh error: {e}")
-
-            await asyncio.sleep(0.08)
-
-    page.run_task(refresh_ui)
-
-
-def assistant_loop():
-    global CAST
-
-    set_status(state="online", assistant_state="idle")
-    logger.info("IVATRON backend worker started.")
-
-    while not SHUTDOWN_EVENT.is_set():
-        if not assistant_is_enabled():
-            set_status(assistant_state="paused")
-            SHUTDOWN_EVENT.wait(0.5)
-            continue
-
-        try:
-            CAST = handle_turn(CAST)
-            set_status(assistant_state="idle", state="online")
-        except Exception as e:
-            logger.error(f"[TURN ERROR] {e}\n{traceback.format_exc()}")
-            set_status(
-                last_error=str(e),
-                assistant_state="error",
-                state="online",
-            )
-            SHUTDOWN_EVENT.wait(2)
-
-
-def initialize_backend():
-    """Perform the existing backend startup checks without owning the UI."""
     _init_wake_word()
 
     if ollama_available():
         set_status(ollama="connected")
         logger.info("Ollama: CONNECTED")
+
         check_vision_model()
         if USE_VERIFICATION and not VISION_AVAILABLE:
             logger.warning(
@@ -3121,67 +2269,55 @@ def initialize_backend():
         set_status(ollama="unreachable")
         logger.warning("Ollama: UNREACHABLE")
 
+    # Show the resolved config so a stale .env is obvious in the log.
     logger.info(f"Config: CLOCK_IP={CLOCK_IP}  MY_IP={MY_IP}  PORT={HTTP_PORT}")
-    logger.info(f"Workspace: {WORKSPACE_ROOT}")
-
-
-def main():
-    global HAS_FLET
-
-    if not HAS_FLET:
-        print("Flet is not installed. Run: pip install flet")
-        return
-
-    httpd = None
 
     try:
-        initialize_backend()
+        # Do NOT connect to the clock here.
+        # We connect lazily the first time we actually need to play audio.
+        cast = None
 
-        # Keep the existing HTTP server because the Lenovo Chromecast needs
-        # to fetch response.wav from the PC over the LAN.
         httpd = serve_directory(r"E:\jarvis", HTTP_PORT)
         logger.info(f"HTTP server on port {HTTP_PORT}")
+        logger.info(f"Dashboard: http://{MY_IP}:{HTTP_PORT}/dashboard")
 
-        # Device monitor does not force a connection. Audio still connects
-        # lazily when IVATRON actually has something to say.
-        threading.Thread(
-            target=monitor_clock,
-            daemon=True,
-            name="ClockMonitor",
-        ).start()
-        threading.Thread(
-            target=monitor_system,
-            daemon=True,
-            name="SystemMonitor",
-        ).start()
+        set_status(state="online")
 
-        def flet_main(page):
-            build_ui(page)
+        print()
+        print("=" * 50)
+        print("          IVATRON IS ONLINE")
+        print("=" * 50)
+        print()
+        print(f"Dashboard:  http://localhost:{HTTP_PORT}/dashboard")
+        print(f"Wake word:  {'ENABLED' if USE_WAKE_WORD else 'disabled'}")
+        print(f"VAD:        {'ENABLED' if (USE_VAD and HAS_WEBRTCVAD) else 'disabled'}")
+        print(f"Verify:     {'ENABLED' if (USE_VERIFICATION and VISION_AVAILABLE) else 'disabled'}")
+        print(f"Vision:     {'available' if VISION_AVAILABLE else 'NOT available'}")
+        print(f"Lenovo:     will connect on first audio output")
+        print(f"Workspace:  {WORKSPACE_ROOT}")
+        print("Press Ctrl+C to stop.")
+        print()
 
-            # Flet 1.x recommends page.run_thread() for blocking libraries
-            # which have no async API. The existing Whisper/Ollama/Piper loop
-            # is intentionally kept in its own worker.
-            page.run_thread(assistant_loop)
-
-        ft.run(flet_main)
+        while True:
+            try:
+                cast = handle_turn(cast)
+            except Exception as e:
+                logger.error(f"[TURN ERROR] {e}\n{traceback.format_exc()}")
+                set_status(last_error=str(e))
+                time.sleep(2)
 
     except KeyboardInterrupt:
         logger.info("Shutting down Ivatron...")
-    except Exception as e:
-        logger.error(f"Fatal UI error: {e}\n{traceback.format_exc()}")
-        raise
-    finally:
-        SHUTDOWN_EVENT.set()
-        set_status(state="offline", assistant_state="offline")
 
+    finally:
         if httpd is not None:
             try:
                 httpd.shutdown()
                 httpd.server_close()
             except Exception:
                 pass
-
-        logger.info("IVATRON shut down cleanly.")
+        set_status(state="offline")
+        logger.info("Server closed cleanly.")
 
 
 # ============================================================
