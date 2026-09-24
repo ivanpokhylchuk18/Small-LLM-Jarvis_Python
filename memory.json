@@ -1,0 +1,8 @@
+{
+  "facts": {
+    "JARVIS_memory_state": "Current memory state",
+    "user_name": "Ivan",
+    "ai_name": "IvanTron",
+    "conversation_history": "..."
+  }
+}
