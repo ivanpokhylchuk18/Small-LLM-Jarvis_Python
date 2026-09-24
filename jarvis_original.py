@@ -79,19 +79,19 @@ except ImportError:
 # CONFIG
 # ============================================================
 
-MY_IP = os.getenv("MY_IP", "192.168.1.71")
-CLOCK_IP = os.getenv("CLOCK_IP", "192.168.1.124")
-CLOCK_UUID = os.getenv(
-    "CLOCK_UUID",
-    "6417e6b7-60ba-df93-d9c4-7218458fb1b4"
-)
+# Keep machine-specific values in the local .env file only.
+# These defaults are intentionally generic so a public repo does not expose
+# your private LAN IPs, Chromecast UUID, or local filesystem paths.
+MY_IP = os.getenv("MY_IP", "127.0.0.1")
+CLOCK_IP = os.getenv("CLOCK_IP", "127.0.0.1")
+CLOCK_UUID = os.getenv("CLOCK_UUID", "")
 
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:latest")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
-PIPER_EN_MODEL = os.getenv("PIPER_EN_MODEL")
-PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL")
+PIPER_EN_MODEL = os.getenv("PIPER_EN_MODEL", "")
+PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL", "")
 
 # Optional speaker index, only needed for multi-speaker Piper models
 # (e.g. some uk_UA voices ship several speakers in one .onnx file).
@@ -99,9 +99,9 @@ PIPER_UK_MODEL = os.getenv("PIPER_UK_MODEL")
 PIPER_EN_SPEAKER = os.getenv("PIPER_EN_SPEAKER")
 PIPER_UK_SPEAKER = os.getenv("PIPER_UK_SPEAKER")
 
-RECORDING_WAV = os.getenv("RECORDING_WAV", r"E:\jarvis\input.wav")
-RESPONSE_WAV = os.getenv("RESPONSE_WAV", r"E:\jarvis\response.wav")
-SCREENSHOT_PATH = os.getenv("SCREENSHOT_PATH", r"E:\jarvis\screenshot.png")
+RECORDING_WAV = os.getenv("RECORDING_WAV", str(Path("./input.wav")))
+RESPONSE_WAV = os.getenv("RESPONSE_WAV", str(Path("./response.wav")))
+SCREENSHOT_PATH = os.getenv("SCREENSHOT_PATH", str(Path("./screenshot.png")))
 
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
 
@@ -119,12 +119,12 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
 SAVE_RECORDINGS = os.getenv("SAVE_RECORDINGS", "false").lower() == "true"
 
 WORKSPACE_ROOT = Path(
-    os.getenv("WORKSPACE_ROOT", r"E:\jarvis\workspace")
+    os.getenv("WORKSPACE_ROOT", "./workspace")
 )
 
-LOGS_DIR = Path(os.getenv("LOGS_DIR", r"E:\jarvis\logs"))
+LOGS_DIR = Path(os.getenv("LOGS_DIR", "./logs"))
 MEMORY_FILE = Path(
-    os.getenv("MEMORY_FILE", r"E:\jarvis\memory.json")
+    os.getenv("MEMORY_FILE", "./memory.json")
 )
 
 USE_WAKE_WORD = os.getenv("USE_WAKE_WORD", "false").lower() == "true"
